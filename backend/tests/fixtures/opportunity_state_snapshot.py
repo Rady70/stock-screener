@@ -193,6 +193,9 @@ class OpportunityStateParitySnapshot:
             price_cache=object(),
             fundamentals_cache=object(),
             benchmark_cache=object(),
+            # Scan-row export does not use group history. Do not initialize its
+            # external caches or platform-specific runtime in this fixture.
+            group_section_builder=object(),
         )
 
     @property

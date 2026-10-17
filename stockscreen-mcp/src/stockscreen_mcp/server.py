@@ -34,6 +34,13 @@ Daily stock-screening data from the open-source stock-screener project
 - rs_rating, rs_rating_1m/3m/12m are 1-99 relative-strength percentiles within
   the stock's own market (99 = strongest). Group ranks are IBD-style industry
   groups ranked by their stocks' RS (1 = strongest).
+- Check status on every result: late or unknown publications are not current.
+  run_screen(require_current=True) requires current data with a matching date.
+- Keep field_availability and growth_metric_basis when interpreting scores.
+  data_status=complete does not establish complete fundamentals or security type.
+  The universe can contain funds; company EPS criteria may not apply to them.
+- CANSLIM is a project-specific score with a year-over-year annual-growth proxy,
+  not a multi-year annual earnings record. RS identifies the published formula.
 - Start with list_screens / run_screen for candidates, get_stock for one ticker,
   market_overview for market health and breadth, group_rankings for leading groups.
 - This is educational screening data, not investment advice.
@@ -50,13 +57,14 @@ ROW_FIELDS = (
     "symbol", "company_name", "current_price", "price_change_1d", "rs_rating", "rs_rating_1m",
     "rs_rating_3m", "rs_rating_12m", "stage", "composite_score", "minervini_score", "canslim_score",
     "ibd_industry_group", "ibd_group_rank", "eps_growth_qq", "sales_growth_qq", "week_52_high_distance",
-    "market_cap_usd",
+    "market_cap_usd", "eps_growth_yy", "currency", "exchange", "market",
 )
-# Internal bookkeeping fields nobody asks about.
-HIDDEN_STOCK_FIELDS = frozenset({
+QUALITY_FIELDS = (
     "market_rs_run_id", "rs_formula_version", "rs_universe_size", "scan_mode", "screeners_run",
-    "applicable_screeners", "unavailable_screeners", "matched_groups", "data_status",
-})
+    "applicable_screeners", "unavailable_screeners", "data_status", "is_scannable", "history_bars",
+    "field_availability", "growth_metric_basis", "growth_reporting_cadence", "rs_as_of_date",
+    "numeric_input_errors",
+)
 BREADTH_FIELDS = (
     "date", "stocks_up_4pct", "stocks_down_4pct", "ratio_5day", "ratio_10day", "advancing_count",
     "declining_count", "new_high_52week_count", "new_low_52week_count", "t2108_pct",
@@ -67,6 +75,7 @@ BREADTH_FIELDS = (
 GROUP_STOCK_FIELDS = (
     "symbol", "company_name", "rs_rating", "rs_rating_1m", "rs_rating_3m", "rs_rating_12m", "stage",
     "price", "price_change_1d", "eps_growth_qq", "sales_growth_qq", "composite_score",
+    "currency", "exchange", "market", *QUALITY_FIELDS,
 )
 
 
@@ -87,8 +96,8 @@ def _pick(row: dict[str, Any], fields: tuple[str, ...] | list[str]) -> dict[str,
     picked = {}
     for field in fields:
         value = row_value(row, field)
-        if value is None or (isinstance(value, float) and not math.isfinite(value)):
-            continue  # inf/NaN (e.g. listing_aware_volume) are not valid JSON
+        if isinstance(value, float) and not math.isfinite(value):
+            value = None  # JSON cannot represent inf/NaN; never turn missing into zero.
         picked[field] = value
     return picked
 
@@ -104,21 +113,62 @@ def _parse_deadline(value: Any) -> datetime | None:
 def _status(entry: dict[str, Any], now: datetime) -> str:
     """StaticLayout.publicationStatus: late once past its deadline, unknown without one."""
     publication = entry.get("publication")
-    if not publication or publication.get("state") == "unknown" or not publication.get("session_date"):
+    if not publication or publication.get("state") not in {"current", "pending", "stale"} or not publication.get("session_date"):
         return "unknown"
     if publication.get("state") == "stale":
         return "late"
+    if entry.get("as_of_date") and entry["as_of_date"] != publication["session_date"]:
+        return "unknown"
     deadline = _parse_deadline(publication.get("late_after")) if publication.get("late_after") else None
     if deadline is None:
         return "unknown"
     return "late" if now > deadline else "current"
 
 
-def _visible_presets(code: str, scan: dict[str, Any]) -> list[dict[str, Any]]:
+def _result_context(code: str, document: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Describe the publication actually read, not a newer cached manifest."""
+    entry = data.market(code, manifest=manifest)
+    as_of = document.get("as_of_date") or document.get("rs_as_of_date")
+    dates = {date for date in (as_of, document.get("rs_as_of_date"), entry.get("as_of_date"),
+                              (entry.get("publication") or {}).get("session_date")) if date}
+    coherence = "unknown" if not as_of or not entry.get("as_of_date") else (
+        "coherent" if len(dates) == 1 else "mismatch"
+    )
+    status = _status(entry, datetime.now(timezone.utc)) if coherence == "coherent" else "unknown"
+    return {
+        "status": status,
+        "publication": entry.get("publication"),
+        "date_coherence": coherence,
+        "published_at": manifest.get("generated_at"),
+        "snapshot_id": manifest["data_root"],
+        "source": data.base_url,
+        "methodology": {
+            "rs": {
+                "basis": "within_market_percentile",
+                "formula_version": document.get("rs_formula_version", entry.get("rs_formula_version")),
+                "universe_size": document.get("rs_universe_size", entry.get("rs_universe_size")),
+            },
+            "canslim": {
+                "label": "Project CANSLIM-style score",
+                "current_earnings_field": "eps_growth_qq",
+                "annual_earnings_field": "eps_growth_yy",
+                "annual_earnings_basis": "year_over_year_proxy",
+                "growth_basis_field": "growth_metric_basis",
+            },
+        },
+        "data_notes": [
+            "complete describes scan status, not complete fundamentals or company classification.",
+            "The universe may include funds; inspect field_availability and growth_metric_basis.",
+            "CANSLIM annual growth uses a year-over-year proxy, not multi-year annual earnings.",
+        ],
+    }
+
+
+def _visible_presets(code: str, scan: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
     # Presets without a filter_expression use the site's legacy filter format; all current
     # publishes use expressions, so those are skipped rather than translated.
     presets = [p for p in scan.get("preset_screens", []) if "filter_expression" in p]
-    if data.market(code).get("features", {}).get("opportunity_state"):
+    if data.market(code, manifest=manifest).get("features", {}).get("opportunity_state"):
         return presets
     return [p for p in presets if not preset_requires_opportunity_state(p)]
 
@@ -156,7 +206,8 @@ def list_markets() -> dict[str, Any]:
         "markets": markets,
         "unavailable_markets": manifest.get("unavailable_markets", []),
         "published_at": manifest.get("generated_at"),
-        "source": SITE_URL,
+        "source": data.base_url,
+        "snapshot_id": manifest["data_root"],
     }
 
 
@@ -166,7 +217,7 @@ def list_screens(market: Market = "US") -> dict[str, Any]:
 
     Pass a screen's id to run_screen.
     """
-    scan, _ = data.scan(market)
+    scan, _, manifest = data.scan_snapshot(market)
     screens = [
         {
             "id": p["id"],
@@ -175,9 +226,10 @@ def list_screens(market: Market = "US") -> dict[str, Any]:
             "rules": p["filter_expression"]["required"]["conditions"],
             "sorted_by": f"{p.get('sort_by')} {p.get('sort_order', 'desc')}",
         }
-        for p in _visible_presets(market, scan)
+        for p in _visible_presets(market, scan, manifest)
     ]
-    return {"market": market.upper(), "as_of_date": scan.get("as_of_date"), "screens": screens}
+    return {"market": market.upper(), "as_of_date": scan.get("as_of_date"), "screens": screens,
+            **_result_context(market, scan, manifest)}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -188,19 +240,24 @@ def run_screen(
     sort_by: Annotated[str | None, Field(description="Field to sort by; defaults to the screen's own sort.")] = None,
     descending: Annotated[bool, Field(description="Direction for sort_by; ignored without sort_by.")] = True,
     limit: Annotated[int, Field(ge=1, le=100, description="Rows to return; total_matches counts all.")] = 25,
+    require_current: Annotated[bool, Field(description="Reject late, unknown or date-mismatched publications.")] = False,
 ) -> dict[str, Any]:
     """Run a preset screen and/or custom filters over a market's full daily scan (every listed stock).
 
-    A preset matches exactly the stocks the project's website shows for it. Filters are
-    combined with AND, including with the preset.
+    Presets use the published rules, with malformed numeric values excluded. Filters are
+    combined with AND, including with the preset. require_current rejects late or unknown data.
     """
     if screen is None and not filters:
         raise ToolError("Pass a screen (see list_screens) or filters, or both.")
-    scan, rows = data.scan(market)
+    scan, rows, manifest = data.scan_snapshot(market)
+    context = _result_context(market, scan, manifest)
+    if require_current and context["status"] != "current":
+        raise ToolError(f"A current publication is required; {market.upper()} status is {context['status']} "
+                        f"as of {scan.get('as_of_date')} (date coherence: {context['date_coherence']}).")
 
     preset = None
     if screen is not None:
-        presets = {p["id"]: p for p in _visible_presets(market, scan)}
+        presets = {p["id"]: p for p in _visible_presets(market, scan, manifest)}
         preset = presets.get(screen.strip().lower())
         if preset is None:
             raise ToolError(f"Unknown screen {screen!r}. Available: {', '.join(presets)}.")
@@ -229,7 +286,7 @@ def run_screen(
 
     used = [field for e in expressions for field in expression_fields(e)]
     extra = [f for f in (*used, sort_by) if f not in ROW_FIELDS]
-    columns = [*ROW_FIELDS, *dict.fromkeys(extra)]
+    columns = list(dict.fromkeys((*ROW_FIELDS, *extra, *QUALITY_FIELDS)))
     return {
         "market": market.upper(),
         "as_of_date": scan.get("as_of_date"),
@@ -237,6 +294,7 @@ def run_screen(
         "total_matches": len(matches),
         "sorted_by": f"{sort_by} {'desc' if descending else 'asc'}",
         "rows": [_pick(row, columns) for row in matches[:limit]],
+        **context,
     }
 
 
@@ -247,14 +305,19 @@ def get_stock(
 ) -> dict[str, Any]:
     """Everything the daily scan knows about one stock: RS ratings, stage, scores, growth, group rank,
     setup/pattern fields, and which preset screens it currently passes."""
-    scan, rows = data.scan(market)
+    scan, rows, manifest = data.scan_snapshot(market)
     wanted = symbol.strip().upper()
     row = next((r for r in rows if str(r.get("symbol", "")).upper() == wanted), None)
     if row is None:
         raise ToolError(f"{wanted} not found in the {market.upper()} scan. Check the symbol and market.")
-    passes = [p["id"] for p in _visible_presets(market, scan) if evaluate_expression(row, p["filter_expression"])]
-    stock = {k: v for k, v in row.items() if k not in HIDDEN_STOCK_FIELDS and v is not None}
-    return {**stock, "as_of_date": scan.get("as_of_date"), "passes_screens": passes}
+    passes = [p["id"] for p in _visible_presets(market, scan, manifest) if evaluate_expression(row, p["filter_expression"])]
+    # Preserve raw fields here: _pick resolves aliases such as USD market cap.
+    stock = {key: None if isinstance(value, float) and not math.isfinite(value) else value
+             for key, value in row.items()}
+    for key in QUALITY_FIELDS:
+        stock.setdefault(key, None)
+    return {**stock, "as_of_date": scan.get("as_of_date"), "passes_screens": passes,
+            **_result_context(market, scan, manifest)}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -262,11 +325,12 @@ def market_overview(market: Market = "US") -> dict[str, Any]:
     """Market health in one call: exposure score and stance (distribution days, follow-through day,
     trend), StockBee-style breadth (4% movers, 5/10-day ratios, T2108, 52-week highs/lows),
     key index/asset moves, and the strongest industry groups."""
-    home = data.page(market, "home")
+    pages, manifest = data.pages_snapshot(market, "home", "breadth")
+    home = pages["home"]
     if home is None:
         raise ToolError(f"No daily snapshot is published for {market.upper()}.")
     exposure = home.get("market_health_exposure")
-    breadth_page = data.page(market, "breadth")
+    breadth_page = pages["breadth"]
     if breadth_page and breadth_page.get("available"):
         payload = breadth_page["payload"]
         history = sorted(payload.get("history_90d", []), key=lambda d: d["date"], reverse=True)
@@ -288,6 +352,7 @@ def market_overview(market: Market = "US") -> dict[str, Any]:
         ],
         "top_groups": [_group_summary(g) for g in home.get("top_groups", [])[:5]],
         "scan_counts": {k: v for k, v in (home.get("scan_summary") or {}).items() if k != "top_results"},
+        **_result_context(market, home, manifest),
     }
 
 
@@ -330,11 +395,13 @@ def group_rankings(
     first. For a quick top-5 alongside breadth, market_overview is enough; to filter stocks by
     group rank, use run_screen with ibd_group_rank. Rankings are end-of-day and update once a day.
     """
-    page = data.page(market, "groups")
+    pages, manifest = data.pages_snapshot(market, "groups")
+    page = pages["groups"]
     if page is None or not page.get("available"):
         raise ToolError(f"Group rankings are not published for {market.upper()}.")
     payload = page["payload"]
-    result: dict[str, Any] = {"market": market.upper(), "as_of_date": page.get("rs_as_of_date")}
+    result: dict[str, Any] = {"market": market.upper(), "as_of_date": page.get("rs_as_of_date"),
+                              **_result_context(market, page, manifest)}
 
     if group is None:
         rankings = payload["rankings"]["rankings"]

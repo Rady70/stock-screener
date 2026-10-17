@@ -22,8 +22,8 @@ from . import __version__
 DEFAULT_BASE_URL = "https://xang1234.github.io/stock-screener/static-data/"
 # GitHub Pages serves the data with Cache-Control: max-age=600.
 MANIFEST_TTL_SECONDS = 600
-# Chart series and per-field availability notes: large and unused by any tool.
-HEAVY_FIELDS = frozenset({"price_sparkline_data", "rs_sparkline_data", "field_availability"})
+# Chart series are omitted; availability notes are part of the data contract.
+HEAVY_FIELDS = frozenset({"price_sparkline_data", "rs_sparkline_data"})
 # ponytail: pruned US rows are ~100 MB as Python objects (more while a chunk is parsed),
 # so keep only the most recently used markets' files; raise it or switch to columnar rows.
 MAX_CACHED_MARKETS = 2
@@ -94,9 +94,9 @@ class StaticData:
                 self._cache = {k: v for k, v in self._cache.items() if k[0] == root}
             return self._manifest
 
-    def market(self, code: str) -> dict[str, Any]:
+    def market(self, code: str, *, manifest: dict[str, Any] | None = None) -> dict[str, Any]:
         code = code.strip().upper()
-        manifest = self.manifest()
+        manifest = self.manifest() if manifest is None else manifest
         entry = manifest["markets"].get(code)
         if entry is not None:
             return entry
@@ -138,45 +138,65 @@ class StaticData:
             self._store(root, key, value)
         return value
 
-    def _retrying(self, load: Callable[[str], Any]) -> Any:
+    def _retrying(self, load: Callable[[dict[str, Any]], Any]) -> Any:
         """Run a load against one publish; only the newest is deployed, so restart on a new one."""
         with self._lock:
             for _ in range(2):
                 try:
-                    return load(self.manifest()["data_root"])
+                    return load(self.manifest())
                 except _GenerationReplaced:
                     continue
             raise ToolError("The published data changed while loading; try again in a minute.")
 
     def load(self, path: str) -> Any:
-        return self._retrying(lambda root: self._load(path, root))
+        return self._retrying(lambda manifest: self._load(path, manifest["data_root"]))
+
+    def pages_snapshot(
+        self, code: str, *names: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read related pages and their publication metadata from one generation."""
+        def load_all(manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            entries = self.market(code, manifest=manifest).get("pages", {})
+            pages = {
+                name: self._load(entries[name]["path"], manifest["data_root"]) if name in entries else None
+                for name in names
+            }
+            return pages, manifest
+
+        return self._retrying(load_all)
 
     def page(self, code: str, page: str) -> Any | None:
         """A market page (home, breadth, groups, scan), or None if not published for it."""
-        entry = self.page_entry(code, page)
-        return None if entry is None else self.load(entry["path"])
+        pages, _ = self.pages_snapshot(code, page)
+        return pages[page]
 
     def page_entry(self, code: str, page: str) -> dict[str, Any] | None:
         return self.market(code).get("pages", {}).get(page)
 
     def scan(self, code: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """The scan manifest and every row, initial rows and chunks merged by symbol."""
-        if self.page_entry(code, "scan") is None:
-            raise ToolError(f"Scan results are not published for {code.upper()}.")
+        scan, rows, _ = self.scan_snapshot(code)
+        return scan, rows
 
-        def load_all(root: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            scan_path = self.page_entry(code, "scan")["path"]
+    def scan_snapshot(self, code: str) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        """The scan, rows and the exact root manifest used to load them."""
+        def load_all(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+            entry = self.market(code, manifest=manifest).get("pages", {}).get("scan")
+            if entry is None:
+                raise ToolError(f"Scan results are not published for {code.upper()}.")
+            root = manifest["data_root"]
+            scan_path = entry["path"]
             scan = self._load(scan_path, root)
             # Lives under the market's prefix so eviction drops it with the market's files.
             key = (root, scan_path.rsplit("/", 1)[0] + "/rows")
             if key in self._cache:
-                return scan, self._cache[key]
+                return scan, self._cache[key], manifest
             merged = {row["symbol"]: row for row in scan.get("initial_rows", [])}
             for chunk in scan.get("chunks", []):
                 for row in self._load(chunk["path"], root, cache=False)["rows"]:
                     merged[row["symbol"]] = row
             rows = list(merged.values())
             self._store(root, key, rows)
-            return scan, rows
+            return scan, rows, manifest
 
         return self._retrying(load_all)

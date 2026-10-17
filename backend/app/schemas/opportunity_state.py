@@ -77,7 +77,7 @@ class OpportunityStateResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1]
-    policy_version: Literal["correction-survivors-v1"]
+    policy_version: Literal["correction-survivors-v1", "correction-survivors-v1-partial-pillars"]
     as_of_date: str | None
     market: str | None
     mic: str | None
@@ -115,6 +115,7 @@ def validate_opportunity_projection(
         resilience_score=resilience_score,
         score_pillars=opportunity_state.score_pillars.model_dump(),
         action_state=ActionState(action_state),
+        policy_version=opportunity_state.policy_version,
     )
 
 

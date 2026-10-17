@@ -102,7 +102,7 @@ async def test_get_stock_returns_the_row_and_the_screens_it_passes():
     assert result["symbol"] == "AAA"
     assert result["rs_rating"] == 95
     assert result["passes_screens"] == ["minervini", "correction_survivors", "se_cup_handle"]
-    assert "field_availability" not in result
+    assert result["field_availability"] == {"short_interest": {"status": "missing"}}
     assert "not found" in await call_error("get_stock", symbol="ZZZ", market="US")
 
 
@@ -163,7 +163,9 @@ def test_publication_status_follows_the_site(publication, status):
 
 def test_picked_rows_never_contain_non_json_numbers():
     row = {"symbol": "X", "scan_mode": "listing_only", "volume": 5.0, "x": float("nan")}
-    assert server._pick(row, ["symbol", "listing_aware_volume", "x", "volume"]) == {"symbol": "X", "volume": 5.0}
+    assert server._pick(row, ["symbol", "listing_aware_volume", "x", "volume"]) == {
+        "symbol": "X", "listing_aware_volume": None, "x": None, "volume": 5.0,
+    }
 
 
 async def test_presets_without_an_expression_are_skipped(use_fake_data):

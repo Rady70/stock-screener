@@ -9,7 +9,9 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
-POLICY_VERSION = "correction-survivors-v1"
+LEGACY_POLICY_VERSION = "correction-survivors-v1"
+POLICY_VERSION = "correction-survivors-v1-partial-pillars"
+SUPPORTED_POLICY_VERSIONS = (LEGACY_POLICY_VERSION, POLICY_VERSION)
 SCHEMA_VERSION = 1
 
 
@@ -154,6 +156,8 @@ class OpportunityAssessment:
     as_of_date: date | None
     benchmark_symbol: str | None
     benchmark_as_of_date: date | None
+
+    policy_version: str = POLICY_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "score_pillars", MappingProxyType(dict(self.score_pillars)))

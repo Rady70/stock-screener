@@ -8,7 +8,9 @@ from datetime import date
 from .model import (
     OPPORTUNITY_EVIDENCE_KEYS,
     OPPORTUNITY_PROJECTION_KEYS,
+    LEGACY_POLICY_VERSION,
     POLICY_VERSION,
+    SUPPORTED_POLICY_VERSIONS,
     SCHEMA_VERSION,
     SCORE_PILLAR_KEYS,
     ActionState,
@@ -21,7 +23,7 @@ def serialize_opportunity_projection(
 ) -> dict[str, object]:
     evidence = {
         "schema_version": SCHEMA_VERSION,
-        "policy_version": POLICY_VERSION,
+        "policy_version": result.policy_version,
         "as_of_date": result.as_of_date.isoformat() if result.as_of_date else None,
         "market": result.market,
         "mic": result.mic,
@@ -70,7 +72,7 @@ def parse_opportunity_projection(
     _require_exact_keys(evidence, OPPORTUNITY_EVIDENCE_KEYS, "opportunity_state")
     if evidence.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("opportunity_state.schema_version is unsupported or malformed")
-    if evidence.get("policy_version") != POLICY_VERSION:
+    if evidence.get("policy_version") not in SUPPORTED_POLICY_VERSIONS:
         raise ValueError("opportunity_state.policy_version is unsupported or malformed")
 
     action_state = _action_state(projection.get("action_state"))
@@ -84,6 +86,7 @@ def parse_opportunity_projection(
         resilience_score=resilience_score,
         score_pillars=score_pillars,
         action_state=action_state,
+        policy_version=evidence["policy_version"],
     )
 
     return OpportunityAssessment(
@@ -104,6 +107,7 @@ def parse_opportunity_projection(
         benchmark_as_of_date=_optional_date(
             evidence.get("benchmark_as_of_date"), "benchmark_as_of_date"
         ),
+        policy_version=evidence["policy_version"],
     )
 
 
@@ -116,11 +120,16 @@ def validate_projection_coherence(
     resilience_score: float | None,
     score_pillars: Mapping[str, float | None],
     action_state: ActionState,
+    policy_version: str = POLICY_VERSION,
 ) -> None:
+    if policy_version not in SUPPORTED_POLICY_VERSIONS:
+        raise ValueError("opportunity_state.policy_version is unsupported or malformed")
     pillars = tuple(score_pillars.values())
     if resilience_score is None:
-        if any(pillar is not None for pillar in pillars):
+        if policy_version == LEGACY_POLICY_VERSION and any(pillar is not None for pillar in pillars):
             raise ValueError("score pillars must be all null when resilience_score is null")
+        if all(pillar is not None for pillar in pillars):
+            raise ValueError("complete score pillars require a resilience_score total")
     else:
         if any(pillar is None for pillar in pillars):
             raise ValueError("score pillars must all be present when resilience_score is present")

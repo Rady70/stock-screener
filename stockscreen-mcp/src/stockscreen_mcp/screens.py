@@ -1,13 +1,13 @@
 """Screen evaluation, ported from frontend/src/features/scan/filterExpressionEvaluator.js.
 
-Kept line-for-line equivalent so a preset matches exactly the rows the static
-site shows for it.
+Kept equivalent to the frontend, including rejecting malformed numeric values.
 """
 
 from __future__ import annotations
 
 import functools
 import math
+import re
 from typing import Any
 
 # frontend/src/features/scan/scanFilterFields.js: OPPORTUNITY_STATE_FIELDS
@@ -57,11 +57,22 @@ def _js_number(value: Any) -> float:
     return math.nan
 
 
-def _less(a: Any, b: Any) -> bool:
-    """JS `a < b`: string vs string compares text, otherwise numbers (NaN is never less)."""
-    if isinstance(a, str) and isinstance(b, str):
-        return a < b
-    return _js_number(a) < _js_number(b)
+_DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def _range_number(value: Any) -> float:
+    """Finite decimal values only; blank, boolean and nonnumeric values are missing."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return math.nan
+    if isinstance(value, str) and not _DECIMAL.fullmatch(value.strip()):
+        return math.nan
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return math.nan
+    if number == 0 and isinstance(value, str) and re.search(r"[1-9]", re.split(r"[eE]", value)[0]):
+        return math.nan  # A nonzero decimal underflowed; it is not an observed zero.
+    return number if math.isfinite(number) else math.nan
 
 
 def _js_equal(a: Any, b: Any) -> bool:
@@ -72,13 +83,16 @@ def _js_equal(a: Any, b: Any) -> bool:
 
 
 def _range(row: dict[str, Any], condition: dict[str, Any]) -> bool:
-    value = row_value(row, condition["field"])
-    if value is None:
+    # This deliberate virtual value bypasses minimum-volume filters for a listing.
+    sentinel = condition["field"] == "listing_aware_volume" and row.get("scan_mode") == "listing_only"
+    value = math.inf if sentinel else _range_number(row_value(row, condition["field"]))
+    if math.isnan(value):
         return False
-    if condition.get("min") is not None and _less(value, condition["min"]):
-        return False
-    if condition.get("max") is not None and _less(condition["max"], value):
-        return False
+    for bound, is_min in (("min", True), ("max", False)):
+        if condition.get(bound) is not None:
+            number = _range_number(condition[bound])
+            if math.isnan(number) or (value < number if is_min else value > number):
+                return False
     return True
 
 

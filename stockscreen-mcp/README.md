@@ -1,5 +1,10 @@
 # stockscreen-mcp
 
+> MarketLab local repair of upstream 0.1.1 at `2fcfc152fbf4ecfdaedad23bce351bd3d90ce4d6`.
+> This working checkout includes local fixes; installing the published PyPI package
+> or launching the bundle below does not include them. The evaluated local environment
+> installs this directory in editable mode. No public release has been made.
+
 <!-- mcp-name: io.github.xang1234/stockscreen-mcp -->
 
 Daily stock screens, relative-strength ratings, market breadth and industry group rankings for **12 markets**, available to Claude, Cursor, VS Code or any other [MCP](https://modelcontextprotocol.io/) client.
@@ -31,7 +36,7 @@ All tools are read-only.
 |---|---|
 | `list_markets` | Markets in the current publish, with each one's data date, status and features |
 | `list_screens` | The 28 preset screens and their exact rules: Minervini, CANSLIM, VCP, cup with handle, high tight flag, momentum, IPOs and more |
-| `run_screen` | A preset and/or your own filters over every stock in a market's scan, sorted, with the match count. A preset returns exactly the stocks the website shows for it |
+| `run_screen` | Published preset rules and/or custom filters, sorted, with the match count; malformed numeric values are excluded locally. Optional `require_current` rejects late or unknown publications |
 | `get_stock` | One stock: RS ratings (overall, 1M, 3M, 12M), stage, screener scores, growth, group rank, setup and pattern fields, and the screens it passes |
 | `market_overview` | Exposure score and stance, distribution days, follow-through day, StockBee-style breadth (4% movers, 5/10-day ratios, T2108, 52-week highs/lows), key index moves, top groups |
 | `group_rankings` | IBD-style industry groups ranked by relative strength, with 1W/1M/3M/6M rank changes and weekly movers. Pass a group for its rank history and strongest stocks |
@@ -40,7 +45,21 @@ All tools are read-only.
 
 - **RS ratings** (`rs_rating`, `rs_rating_1m/3m/12m`) are percentiles from 1 to 99 *within the stock's own market*, where 99 is the strongest.
 - **Group rank 1** is the strongest group.
-- **Every result has an `as_of_date`:** the last completed session the publish covers. This is end-of-day data with nothing intraday, and it is never fetched live from price providers.
+- **Every market result has an `as_of_date` and `status`:** `current`, `late` or `unknown`.
+  Related pages and their publication metadata are read from the same snapshot.
+  `snapshot_id`, `published_at`, `source` and `publication` identify that snapshot.
+  `run_screen(require_current=True)` rejects late, unknown or date-mismatched publications.
+  These remain publisher freshness assessments; they do not independently certify exchange calendars.
+- **Missing and zero differ:** stock and screen results retain nulls, `field_availability`,
+  `data_status`, growth basis/cadence and RS formula/run/universe metadata. `complete` is scan
+  status, not proof of complete fundamentals or company classification; funds can be present.
+  `get_stock` preserves raw nulls; screen aliases can still derive USD capitalization from
+  a USD local capitalization. Numeric ranges reject nonnumeric, nonfinite and underflowed
+  values; ordinary numeric strings and actual zero remain supported.
+- **Methodology:** responses identify the published RS formula and the project's CANSLIM-style
+  score. Its annual-earnings component uses a year-over-year proxy, not multi-year annual history.
+  Growth-field interpretation follows `growth_metric_basis`.
+- This is end-of-day data with nothing intraday, never fetched live from price providers.
 
 ## Setup
 

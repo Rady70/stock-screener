@@ -213,12 +213,14 @@ def test_explicit_tag_wins(run):
     assert "docker manifest" not in calls
 
 
-def test_falls_back_to_latest_when_the_checkout_has_no_published_image(run):
+def test_fails_when_the_checkout_and_fallback_have_no_published_pair(run):
     if _checkout_tag().startswith("v"):
         pytest.skip("release checkouts never fall back")
-    result, values, _ = run(FAKE_MANIFEST_EXIT="1")
+    result = run(expect_ok=False, FAKE_MANIFEST_EXIT="1")
 
-    assert values["APP_IMAGE_TAG"] == "latest"
+    assert result.returncode != 0
+    assert not run.env_file.exists()
+    assert "APP_IMAGE_TAG" in result.stderr
     assert "no published image for this checkout" in result.stderr
 
 
@@ -240,22 +242,24 @@ def test_newest_main_build_is_pinned_to_one_commit_for_both_images(run):
     assert "sha-abcdef1" in result.stderr
 
 
-def test_uses_plain_latest_when_the_latest_revision_cannot_be_read(run):
+def test_fails_without_writing_config_when_the_latest_revision_cannot_be_read(run):
     if _checkout_tag().startswith("v"):
         pytest.skip("release checkouts never fall back")
-    _, values, _ = run(FAKE_MANIFEST_MISSING=_checkout_tag())
+    result = run(expect_ok=False, FAKE_MANIFEST_MISSING=_checkout_tag())
 
-    assert values["APP_IMAGE_TAG"] == "latest"
+    assert result.returncode != 0
+    assert not run.env_file.exists()
 
 
-def test_falls_back_when_only_the_backend_image_was_published(run):
+def test_rejects_pair_when_only_the_backend_image_was_published(run):
     # publish-images pushes the backend before building the frontend; a failed
     # frontend push leaves a sha-* tag that cannot be pulled as a pair.
     if _checkout_tag().startswith("v"):
         pytest.skip("release checkouts never fall back")
-    _, values, _ = run(FAKE_MANIFEST_MISSING="stockscreenclaude-frontend")
+    result = run(expect_ok=False, FAKE_MANIFEST_MISSING="stockscreenclaude-frontend")
 
-    assert values["APP_IMAGE_TAG"] == "latest"
+    assert result.returncode != 0
+    assert not run.env_file.exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="bind-mount ownership only matters on Linux")

@@ -13,6 +13,7 @@ Tables:
     feature_run_pointers      — Atomic publish pointers (e.g. 'latest_published')
 """
 import math
+import re
 
 from sqlalchemy import (
     Boolean, Column, Integer, Float, Text, Date, DateTime, JSON,
@@ -195,6 +196,13 @@ HOT_NUMERIC_FIELDS = (
 )
 HOT_TEXT_FIELDS = ("ibd_industry_group", "gics_sector")
 
+# Union of typed numeric fields and JSON float-expression indexes (0021/0057/0064).
+NUMERIC_DETAILS_FIELDS = frozenset((*HOT_NUMERIC_FIELDS,
+    "stage", "volume_breakthrough_score", "ipo_score", "price_change_1d",
+    "ibd_group_rank", "resilience_score",
+))
+_FINITE_DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
 
 def _hot_number(value):
     """``value`` as PostgreSQL's ``CAST(details ->> key AS FLOAT)`` reads it,
@@ -210,6 +218,48 @@ def _hot_number(value):
     if not math.isfinite(number) and any(char.isdigit() for char in str(value)):
         return None
     return number
+
+
+def normalize_numeric_details(details):
+    """Keep indexed values castable; retain rejected inputs outside numeric paths.
+
+    Both ORM and Core writers use this before deriving the table copy. The input
+    dict and nested source evidence are never mutated. Missing is never zero.
+    """
+    if not isinstance(details, dict):
+        return details
+    result = dict(details)
+    notes = dict(details["field_availability"]) if isinstance(details.get("field_availability"), dict) else {}
+    errors = dict(details["numeric_input_errors"]) if isinstance(details.get("numeric_input_errors"), dict) else {}
+    changed = False
+    for field in NUMERIC_DETAILS_FIELDS:
+        value = details.get(field)
+        if value is None:
+            continue
+        number = _hot_number(value)
+        valid = number is not None and math.isfinite(number)
+        valid = valid and (not isinstance(value, str) or bool(_FINITE_DECIMAL.fullmatch(value.strip())))
+        if number == 0 and isinstance(value, str) and re.search(r"[1-9]", re.split(r"[eE]", value)[0]):
+            valid = False  # Underflow must not turn a rejected input into an observed zero.
+        if valid:
+            if field in errors:
+                errors.pop(field)
+                note = notes.get(field)
+                if isinstance(note, dict) and note.get("reason_code") == "invalid_numeric_value":
+                    notes.pop(field)
+                changed = True
+            continue
+        result[field] = None
+        errors[field] = {"value_repr": repr(value), "value_type": type(value).__name__}
+        note = notes.get(field)
+        notes[field] = {**(note if isinstance(note, dict) else {}),
+                        "status": "missing", "reason_code": "invalid_numeric_value"}
+        changed = True
+    if changed:
+        result["field_availability"] = notes
+        result["numeric_input_errors"] = errors
+        return result
+    return details
 
 
 def derived_details_columns(details) -> dict:
@@ -230,6 +280,7 @@ def derived_details_columns(details) -> dict:
 @event.listens_for(StockFeatureDaily, "before_update")
 def _store_table_details(_mapper, _connection, target) -> None:
     if inspect(target).attrs.details_json.history.has_changes():
+        target.details_json = normalize_numeric_details(target.details_json)
         for column, value in derived_details_columns(target.details_json).items():
             setattr(target, column, value)
         # Without a setup payload the copy is the details object itself, so

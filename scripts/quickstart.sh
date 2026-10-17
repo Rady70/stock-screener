@@ -63,7 +63,7 @@ resolve_image_tag() {
     echo "sha-${revision:0:7}"
     return
   fi
-  echo latest
+  fail "cannot resolve a matching immutable backend/frontend image pair. Install/repair Docker Buildx or set APP_IMAGE_TAG to an explicitly selected release or sha tag; no configuration was written."
 }
 
 commit_images_exist() {

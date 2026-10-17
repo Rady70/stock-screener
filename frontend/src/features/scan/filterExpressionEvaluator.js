@@ -15,12 +15,29 @@ function rowValue(row, field) {
   return row?.[field];
 }
 
+const DECIMAL = /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+
+function rangeNumber(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return Number.NaN;
+  if (typeof value === 'string' && !DECIMAL.test(value.trim())) return Number.NaN;
+  const number = Number(value);
+  if (number === 0 && typeof value === 'string' && /[1-9]/.test(value.split(/[eE]/)[0])) return Number.NaN;
+  return Number.isFinite(number) ? number : Number.NaN;
+}
+
 const CONDITION_EVALUATORS = {
   range: (row, condition) => {
-    const value = rowValue(row, condition.field);
-    if (value == null) return false;
-    if (condition.min != null && value < condition.min) return false;
-    if (condition.max != null && value > condition.max) return false;
+    const listingSentinel = condition.field === 'listing_aware_volume' && row?.scan_mode === 'listing_only';
+    const value = listingSentinel ? Number.POSITIVE_INFINITY : rangeNumber(rowValue(row, condition.field));
+    if (Number.isNaN(value)) return false;
+    if (condition.min != null) {
+      const min = rangeNumber(condition.min);
+      if (Number.isNaN(min) || value < min) return false;
+    }
+    if (condition.max != null) {
+      const max = rangeNumber(condition.max);
+      if (Number.isNaN(max) || value > max) return false;
+    }
     return true;
   },
   categorical: (row, condition) => {

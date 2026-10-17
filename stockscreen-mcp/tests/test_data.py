@@ -68,7 +68,7 @@ def test_heavy_fields_are_dropped_on_load(static_data):
     for row in rows:
         assert "price_sparkline_data" not in row
         assert "rs_sparkline_data" not in row
-        assert "field_availability" not in row
+        assert row["field_availability"] == {"short_interest": {"status": "missing"}}
 
 
 def test_a_replaced_generation_is_reloaded_from_the_new_publish(static_data, fake_publish, clock):

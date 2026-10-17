@@ -27,6 +27,12 @@ scripts/quickstart.sh
 
 Optional settings, saved to `.env.docker` when given: `ENABLED_MARKETS=US,HK` (default `US`), `FRONTEND_PORT=8080` (default `80`). `APP_IMAGE_TAG=vX.Y.Z` pins a specific image tag. Re-run the script after `git pull` to upgrade; your password and other settings in `.env.docker` are kept. For a fixed release, clone it directly: `git clone --branch vX.Y.Z ...`.
 
+The MarketLab local repair stops before writing configuration if automatic resolution
+cannot find a matching immutable backend/frontend image pair. Repair Docker Buildx or
+select a known matching release/commit with `APP_IMAGE_TAG`; it no longer silently falls
+back to mutable `latest` images. Published upstream images do not contain local source
+repairs: using those repairs in the full app requires a build from the modified source.
+
 Images are published for `linux/amd64` only. Docker Desktop on Apple Silicon runs them through Rosetta automatically (slower, especially on first start); ARM Linux hosts need amd64 emulation (`qemu-user-static` / binfmt) installed first.
 
 CI runs this exact script against each published `main` build and release tag, and on pull requests that change install files (`quickstart-smoke` in `.github/workflows/ci.yml`). A GitHub Release is only created after it passes.

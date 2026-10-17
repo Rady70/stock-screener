@@ -22,6 +22,28 @@ const PILLARS = Object.freeze([
   ['liquidity_freshness', 'Liquidity/freshness'],
 ]);
 
+const SCORE_INPUT_LABELS = Object.freeze({
+  benchmark_relative_return_65d: '65-session benchmark-relative return',
+  rs_line_new_high: 'RS-line new-high status',
+  rs_line_blue_dot: 'RS-line leadership status',
+  rs_rating_1m: 'one-month relative strength',
+  rs_rating_3m: 'three-month relative strength',
+  stage: 'trend stage',
+  ma_alignment: 'moving-average alignment',
+  invalidation: 'trend invalidation checks',
+  squeeze: 'volatility squeeze status',
+  tight_closes_count: 'tight-closes count',
+  quiet_days_count: 'quiet-day count',
+  volume_vs_50d: 'volume relative to its 50-day average',
+  volume_dry_up_max: 'volume dry-up threshold',
+  setup_payload: 'pattern analysis',
+  primary_pattern: 'primary-pattern assessment',
+  liquidity: 'liquidity assessment',
+  liquidity_passes: 'liquidity result',
+  feature_status: 'scan data status',
+  is_scannable: 'screening eligibility',
+});
+
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 const formatValue = (value) => {
@@ -40,6 +62,15 @@ const formatScore = (score) => {
 const formatCode = (value) => {
   const words = String(value).replace(/[_-]/g, ' ');
   return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+};
+
+const missingInputExplanation = (values) => {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  if (values.includes('future_benchmark_date')) {
+    return "Benchmark data is later than this stock's snapshot.";
+  }
+  const labels = values.map((value) => SCORE_INPUT_LABELS[value] || formatCode(value));
+  return `Missing ${labels.length === 1 ? 'input' : 'inputs'}: ${labels.join(', ')}.`;
 };
 
 function Section({ title, children }) {
@@ -120,6 +151,14 @@ function OpportunityEvidenceDrawer({
   const scorePillars = isRecord(evidence.score_pillars)
     ? evidence.score_pillars
     : {};
+  const missingInputs = isRecord(evidence.metrics?.score_missing_inputs)
+    ? evidence.metrics.score_missing_inputs : {};
+  const availablePillars = PILLARS.filter(([key]) => Number.isFinite(scorePillars[key])).length;
+  const scoreMissing = row.resilience_score === null || row.resilience_score === undefined || row.resilience_score === '';
+  const incomplete = scoreMissing && (availablePillars > 0 || Object.keys(missingInputs).length > 0);
+  const displayedMetrics = isRecord(evidence.metrics)
+    ? Object.fromEntries(Object.entries(evidence.metrics).filter(([key]) => key !== 'score_missing_inputs'))
+    : {};
 
   return (
     <Drawer
@@ -142,11 +181,30 @@ function OpportunityEvidenceDrawer({
       </Section>
 
       <Section title="Resilience score">
-        <Typography variant="h4" component="p">{formatScore(row.resilience_score)}</Typography>
+        <Typography variant="h4" component="p">{incomplete ? 'Incomplete' : formatScore(row.resilience_score)}</Typography>
+        {incomplete && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            {availablePillars} of 5 pillars available. The total requires all five.
+          </Typography>
+        )}
+        {scoreMissing && !incomplete && evidence.policy_version === 'correction-survivors-v1' && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            This snapshot has no pillar scores. Individual pillars need to be calculated in a new scan.
+          </Typography>
+        )}
       </Section>
 
       <Section title="Score pillars">
-        {PILLARS.map(([key, label]) => <Detail key={key} label={label} value={scorePillars[key]} />)}
+        {PILLARS.map(([key, label]) => (
+          <Box key={key}>
+            <Detail label={label} value={Number.isFinite(scorePillars[key]) ? Number(scorePillars[key].toFixed(1)) : null} />
+            {missingInputExplanation(missingInputs[key]) && (
+              <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 1 }}>
+                {missingInputExplanation(missingInputs[key])}
+              </Typography>
+            )}
+          </Box>
+        ))}
       </Section>
 
       <Section title="Data availability">
@@ -154,7 +212,7 @@ function OpportunityEvidenceDrawer({
       </Section>
 
       <Section title="Metrics">
-        <EvidenceDetails values={evidence.metrics} />
+        <EvidenceDetails values={displayedMetrics} />
       </Section>
 
       <Section title="Passed checks">

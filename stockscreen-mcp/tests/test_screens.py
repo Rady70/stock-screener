@@ -23,8 +23,8 @@ from conftest import PRESETS, condition
         # Missing and null values never pass a range, even an open one.
         ({}, condition("rs_rating", "range", min=None, max=None), False),
         ({"rs_rating": None}, condition("rs_rating", "range", min=0, max=None), False),
-        # JS compares a string to a number as NaN (false), so neither bound rejects it.
-        ({"rs_rating": "n/a"}, condition("rs_rating", "range", min=70, max=99), True),
+        # Invalid numeric observations must not pass just because NaN comparisons are false.
+        ({"rs_rating": "n/a"}, condition("rs_rating", "range", min=70, max=99), False),
         # Booleans need a real boolean, not a truthy string.
         ({"ma_alignment": True}, condition("ma_alignment", "boolean", value=True), True),
         ({"ma_alignment": "true"}, condition("ma_alignment", "boolean", value=True), False),

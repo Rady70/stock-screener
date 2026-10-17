@@ -57,7 +57,8 @@ def evaluate_opportunity_state(inputs: OpportunityEvidence) -> OpportunityStateR
             freshness_gate,
         ),
     )
-    score_pillars = _score_pillars(inputs, benchmark_is_future)
+    missing_score_inputs = _missing_score_inputs(inputs, benchmark_is_future)
+    score_pillars = _score_pillars(inputs, missing_score_inputs)
     score = _resilience_score(score_pillars)
     correction_survivor = (
         required_complete
@@ -99,8 +100,11 @@ def evaluate_opportunity_state(inputs: OpportunityEvidence) -> OpportunityStateR
         failed_checks=tuple(failed_checks),
         warnings=tuple(warnings),
         action_reasons=action_reasons,
-        metrics=_metrics(inputs, hard_invalidation),
-        data_availability=_data_availability(inputs, required_complete, benchmark_is_future),
+        metrics={**_metrics(inputs, hard_invalidation), "score_missing_inputs": missing_score_inputs},
+        data_availability={
+            **_data_availability(inputs, required_complete, benchmark_is_future),
+            "resilience_score": "available" if score is not None else "incomplete",
+        },
         market=inputs.provenance.market,
         mic=inputs.provenance.mic,
         as_of_date=inputs.provenance.as_of_date,
@@ -134,16 +138,13 @@ def _required_evidence_complete(
 
 
 def _score_pillars(
-    inputs: OpportunityEvidence, benchmark_is_future: bool
+    inputs: OpportunityEvidence, missing: Mapping[str, list[str]]
 ) -> dict[str, float | None]:
-    if benchmark_is_future or not _score_inputs_known(inputs):
-        return {key: None for key in _SCORE_PILLAR_KEYS}
-
     hard_invalidation = _hard_invalidation(
         inputs.trend.invalidation.value,
         inputs.trend.invalidation.available,
     )
-    leadership = float(
+    leadership = None if "benchmark_leadership" in missing else float(
         (12 if inputs.leadership.benchmark_relative_return_65d > 0 else 0)
         + (
             8
@@ -152,16 +153,16 @@ def _score_pillars(
             else 0
         )
     )
-    multi_horizon = (
+    multi_horizon = None if "multi_horizon_rs" in missing else (
         10 * _clamp(inputs.leadership.rs_rating_1m) / 100
         + 10 * _clamp(inputs.leadership.rs_rating_3m) / 100
     )
-    trend = float(
+    trend = None if "trend_integrity" in missing else float(
         8 * (inputs.trend.stage in (1, 2))
         + 8 * bool(inputs.trend.ma_alignment)
         + 4 * (not hard_invalidation)
     )
-    structure = float(
+    structure = None if "structure_tightness" in missing else float(
         8 * bool(inputs.structure.primary_pattern.value)
         + 4 * bool(inputs.structure.squeeze)
         + 3 * (inputs.structure.tight_closes_count >= 3)
@@ -169,7 +170,7 @@ def _score_pillars(
         + 2
         * (inputs.structure.volume_vs_50d <= inputs.structure.volume_dry_up_max)
     )
-    tradability = float(
+    tradability = None if "liquidity_freshness" in missing else float(
         10 * bool(inputs.tradability.liquidity.value)
         + 10
         * (
@@ -193,33 +194,50 @@ def _resilience_score(score_pillars: Mapping[str, float | None]) -> float | None
     return round(sum(values), 1)
 
 
-def _score_inputs_known(inputs: OpportunityEvidence) -> bool:
-    values = (
-        inputs.leadership.benchmark_relative_return_65d,
-        inputs.leadership.rs_rating_1m,
-        inputs.leadership.rs_rating_3m,
-        inputs.leadership.rs_line_new_high,
-        inputs.leadership.rs_line_blue_dot,
-        inputs.trend.stage,
-        inputs.trend.ma_alignment,
-        inputs.trend.invalidation.value,
-        inputs.structure.squeeze,
-        inputs.structure.tight_closes_count,
-        inputs.structure.quiet_days_count,
-        inputs.structure.volume_vs_50d,
-        inputs.structure.volume_dry_up_max,
-        inputs.tradability.liquidity.value,
-        inputs.tradability.feature_status,
-        inputs.tradability.is_scannable,
-    )
-    return (
-        all(value is not None for value in values)
-        and inputs.trend.invalidation.available is True
-        and inputs.structure.setup_payload_available is True
-        and inputs.structure.primary_pattern.available is True
-        and inputs.tradability.liquidity.available is True
-        and _valid_invalidation_flags(inputs.trend.invalidation.value)
-    )
+def _missing_score_inputs(
+    inputs: OpportunityEvidence, benchmark_is_future: bool
+) -> dict[str, list[str]]:
+    """Each pillar owns its prerequisites; an unknown contribution is never zero."""
+    if benchmark_is_future:
+        return {key: ["future_benchmark_date"] for key in _SCORE_PILLAR_KEYS}
+    values = {
+        "benchmark_leadership": {
+            "benchmark_relative_return_65d": inputs.leadership.benchmark_relative_return_65d,
+            "rs_line_new_high": inputs.leadership.rs_line_new_high,
+            "rs_line_blue_dot": inputs.leadership.rs_line_blue_dot,
+        },
+        "multi_horizon_rs": {
+            "rs_rating_1m": inputs.leadership.rs_rating_1m,
+            "rs_rating_3m": inputs.leadership.rs_rating_3m,
+        },
+        "trend_integrity": {
+            "stage": inputs.trend.stage,
+            "ma_alignment": inputs.trend.ma_alignment,
+        },
+        "structure_tightness": {
+            "squeeze": inputs.structure.squeeze,
+            "tight_closes_count": inputs.structure.tight_closes_count,
+            "quiet_days_count": inputs.structure.quiet_days_count,
+            "volume_vs_50d": inputs.structure.volume_vs_50d,
+            "volume_dry_up_max": inputs.structure.volume_dry_up_max,
+        },
+        "liquidity_freshness": {
+            "liquidity_passes": inputs.tradability.liquidity.value,
+            "feature_status": inputs.tradability.feature_status,
+            "is_scannable": inputs.tradability.is_scannable,
+        },
+    }
+    missing = {key: [name for name, value in fields.items() if value is None]
+               for key, fields in values.items()}
+    if inputs.trend.invalidation.available is not True or not _valid_invalidation_flags(inputs.trend.invalidation.value):
+        missing["trend_integrity"].append("invalidation")
+    if inputs.structure.setup_payload_available is not True:
+        missing["structure_tightness"].append("setup_payload")
+    if inputs.structure.primary_pattern.available is not True:
+        missing["structure_tightness"].append("primary_pattern")
+    if inputs.tradability.liquidity.available is not True:
+        missing["liquidity_freshness"].append("liquidity")
+    return {key: reasons for key, reasons in missing.items() if reasons}
 
 
 def _leadership_gate(inputs: OpportunityEvidence) -> bool | None:

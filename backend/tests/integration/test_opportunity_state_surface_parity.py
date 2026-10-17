@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 
 from app.api.v1.filter_presets import router as filter_presets_router
 from app.api.v1.scans import router as scans_router
@@ -18,6 +19,9 @@ from app.domain.scanning.filter_expression_serialization import (
 from app.domain.scanning.legacy_filter_expression import (
     legacy_filters_to_expression,
 )
+from app.domain.scanning.opportunity_state import evaluate_opportunity_state, serialize_opportunity_projection
+from app.domain.scanning.opportunity_state.model import POLICY_VERSION
+from app.infra.db.models.feature_store import StockFeatureDaily
 from app.infra.db.uow import SqlUnitOfWork
 from app.schemas.scanning import ScanResultsResponse
 from app.wiring.bootstrap import get_uow
@@ -246,7 +250,7 @@ async def test_live_and_static_contracts_match_for_all_action_states(
         assert evidence["warnings"] == EXPECTED_WARNINGS[symbol]
         assert evidence["action_reasons"] == EXPECTED_REASONS[symbol]
         assert evidence["schema_version"] == 1
-        assert evidence["policy_version"] == "correction-survivors-v1"
+        assert evidence["policy_version"] == POLICY_VERSION
         assert evidence["as_of_date"] == "2026-08-21"
         assert evidence["market"] == "US"
         assert evidence["mic"] == "XNAS"
@@ -272,3 +276,39 @@ async def test_live_and_static_contracts_match_for_all_action_states(
     assert survivor_screen["filters"] == {"correctionSurvivor": True}
     assert survivor_screen["sort_by"] == "resilience_score"
     assert survivor_screen["sort_order"] == "desc"
+
+
+def test_partial_pillars_survive_persistence_live_response_and_static_export(tmp_path, parity_snapshot):
+    """Exercise the actual writer, response schema and published-row exporter."""
+    module = _load_fixture_module()
+    expected_states = {"EVENT": "event_risk", "EXTENDED": "extended"}
+    with parity_snapshot.session_factory() as db:
+        for symbol, state in expected_states.items():
+            inputs = module._complete_inputs(
+                tight_closes_count=None,
+                earnings_soon=state == "event_risk",
+                extended=state == "extended",
+            )
+            stored = db.execute(select(StockFeatureDaily).where(StockFeatureDaily.symbol == symbol)).scalar_one()
+            stored.details_json = {
+                **stored.details_json,
+                **serialize_opportunity_projection(evaluate_opportunity_state(inputs)),
+            }
+        db.commit()
+
+    live_rows = parity_snapshot.query_live_rows()
+    static_rows = parity_snapshot.export_and_read_static_rows(tmp_path)
+    assert _compact_projection(live_rows) == _compact_projection(static_rows)
+    for rows in (live_rows, static_rows):
+        for row in rows:
+            if row["symbol"] not in expected_states:
+                continue
+            assert row["action_state"] == expected_states[row["symbol"]]
+            assert row["resilience_score"] is None
+            evidence = row["opportunity_state"]
+            assert evidence["policy_version"] == POLICY_VERSION
+            assert evidence["score_pillars"] == {
+                "benchmark_leadership": 20, "multi_horizon_rs": 17, "trend_integrity": 20,
+                "structure_tightness": None, "liquidity_freshness": 20,
+            }
+            assert evidence["metrics"]["score_missing_inputs"] == {"structure_tightness": ["tight_closes_count"]}
